@@ -1,12 +1,11 @@
-﻿import urllib.parse
+import urllib.parse
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="1.0.0")
+app = FastAPI(title="Manhwa Arabic API", version="1.1.0")
 
-# السماح للتطبيق بالاتصال بالسيرفر دون قيود CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,8 +15,6 @@ app.add_middleware(
 )
 
 BASE_URL = "https://www.mgeko.cc"
-
-# جلسة تحاكي متصفح Chrome 120 الحقيقي لتجاوز أي حظر
 session = requests.Session(impersonate="chrome120")
 
 
@@ -30,7 +27,7 @@ def home():
 
 
 # ========================================================
-# 1. جلب قائمة المانهوات (يدعم الصفحات والبحث)
+# 1. جلب قائمة المانهوات (يدعم الصفحات والبحث الفوري)
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
@@ -38,11 +35,13 @@ def get_mangas(page: int = 1, query: str = ""):
 
     if query:
         encoded = urllib.parse.quote(query)
-        target_url = f"{BASE_URL}/search/?keyword={encoded}&page={page}"
+        # استخدام مسار البحث المباشر السريع الذي يرجع HTML جاهز
+        target_url = f"{BASE_URL}/autocomplete?term={encoded}"
     elif page == 1:
         target_url = BASE_URL
     else:
-        target_url = f"{BASE_URL}/browse-comics/?genre_included=Manhwa&page={page}"
+        # ترقيم صفحات التصفح في mgeko يعتمد على results=
+        target_url = f"{BASE_URL}/browse-comics/?results={page}&filter=New"
 
     try:
         resp = session.get(
@@ -56,44 +55,62 @@ def get_mangas(page: int = 1, query: str = ""):
         soup = BeautifulSoup(resp.text, "html.parser")
         mangas = []
 
-        for a in soup.select("a[href*='/manga/']"):
-            img = a.select_one("img")
-            if not img:
+        # البحث عن كل الروابط التي تشير إلى المانجا
+        for a in soup.select("a[href*='/manga/'], li a"):
+            href = a.get("href", "")
+            if not href or "/manga/" not in href:
                 continue
 
-            href = a.get("href", "")
             if not href.startswith("http"):
                 href = urllib.parse.urljoin(BASE_URL, href)
             if href.endswith("/all-chapters/"):
                 href = href.replace("/all-chapters/", "/")
 
-            cover = (
-                img.get("data-src")
-                or img.get("data-lazy-src")
-                or img.get("src")
-                or ""
-            ).strip()
-            if cover.startswith("//"):
-                cover = "https:" + cover
-            elif cover.startswith("/"):
-                cover = urllib.parse.urljoin(BASE_URL, cover)
+            img = (
+                a.select_one("img")
+                or a.find_previous("img")
+                or a.find_next("img")
+            )
 
-            title = img.get("alt", "").strip()
+            cover = ""
+            if img:
+                cover = (
+                    img.get("data-src")
+                    or img.get("data-lazy-src")
+                    or img.get("src")
+                    or ""
+                ).strip()
+                if cover.startswith("//"):
+                    cover = "https:" + cover
+                elif cover.startswith("/"):
+                    cover = urllib.parse.urljoin(BASE_URL, cover)
+
+            title = ""
+            if img and img.get("alt"):
+                title = img.get("alt").strip()
             if not title:
-                parent = a.find_parent()
-                if parent:
-                    t_el = parent.select_one("h2, h3, h4, .title, .novel-title")
-                    if t_el:
-                        title = t_el.get_text(strip=True)
+                t_el = a.select_one("h2, h3, h4, .title, .novel-title, span")
+                if t_el:
+                    title = t_el.get_text(strip=True)
             if not title:
                 title = a.get_text(strip=True)
 
             if (
                 title
-                and cover.startswith("http")
+                and len(title) > 2
                 and not any(m["url"] == href for m in mangas)
             ):
-                mangas.append({"title": title, "url": href, "cover_url": cover})
+                mangas.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "cover_url": (
+                            cover
+                            if cover.startswith("http")
+                            else "https://www.mgeko.cc/static/img/logo_200x200.png"
+                        ),
+                    }
+                )
 
         return {"page": page, "count": len(mangas), "mangas": mangas}
     except Exception as e:
@@ -112,7 +129,6 @@ def get_chapters(manga_url: str):
     all_chapters_url = clean_url.rstrip("/") + "/all-chapters/"
     chapters = []
 
-    # 1. تجربة صفحة all-chapters
     try:
         resp = session.get(
             all_chapters_url, headers={"Referer": BASE_URL}, timeout=12
@@ -129,7 +145,6 @@ def get_chapters(manga_url: str):
     except Exception:
         pass
 
-    # 2. تجربة الصفحة المباشرة إن لم يجد في الأولى
     if not chapters:
         try:
             resp = session.get(
@@ -149,12 +164,12 @@ def get_chapters(manga_url: str):
         except Exception:
             pass
 
-    chapters.reverse()  # يبدأ من الفصل 1
+    chapters.reverse()
     return {"total": len(chapters), "chapters": chapters}
 
 
 # ========================================================
-# 3. استخراج روابط صور الفصل المختار
+# 3. استخراج روابط صور الفصل
 # ========================================================
 @app.get("/api/pages")
 def get_pages(chapter_url: str):
@@ -188,7 +203,7 @@ def get_pages(chapter_url: str):
 
 
 # ========================================================
-# 4. بروكسي لتحميل الصور وتمريرها للأندرويد بدون أي مشاكل
+# 4. بروكسي تحميل الصور
 # ========================================================
 @app.get("/api/proxy-image")
 def proxy_image(url: str):
