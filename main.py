@@ -1,4 +1,5 @@
-import httpx
+import urllib.parse
+from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,7 +14,7 @@ app.add_middleware(
 )
 
 MD_API = "https://api.mangadex.org"
-client = httpx.Client(timeout=20.0, follow_redirects=True)
+session = requests.Session(impersonate="chrome120")
 
 
 @app.get("/")
@@ -25,29 +26,29 @@ def home():
 
 
 # ========================================================
-# 1. جلب آلاف المانهوات الحقيقية مع دعم كامل للتقليب والسحب
+# 1. جلب آلاف المانهوات الكورية الأكثر شهرة مع التقليب
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
     limit = 24
     offset = max(0, (page - 1) * limit)
 
-    params = {
-        "limit": limit,
-        "offset": offset,
-        "originalLanguage[]": "ko",  # مانهوا كورية فقط
-        "includes[]": "cover_art",
-        "contentRating[]": ["safe", "suggestive"],
-    }
-
     if query.strip():
-        params["title"] = query.strip()
+        encoded_q = urllib.parse.quote(query.strip())
+        target_url = (
+            f"{MD_API}/manga?limit={limit}&offset={offset}"
+            f"&originalLanguage[]=ko&includes[]=cover_art"
+            f"&contentRating[]=safe&contentRating[]=suggestive&title={encoded_q}"
+        )
     else:
-        # ترتيب حسب الأكثر شهرة ومتابعة عالمياً
-        params["order[followedCount]"] = "desc"
+        target_url = (
+            f"{MD_API}/manga?limit={limit}&offset={offset}"
+            f"&originalLanguage[]=ko&includes[]=cover_art"
+            f"&contentRating[]=safe&contentRating[]=suggestive&order[followedCount]=desc"
+        )
 
     try:
-        resp = client.get(f"{MD_API}/manga", params=params)
+        resp = session.get(target_url, timeout=20)
         if resp.status_code != 200:
             raise HTTPException(
                 status_code=resp.status_code, detail="MangaDex error"
@@ -60,17 +61,15 @@ def get_mangas(page: int = 1, query: str = ""):
             m_id = item.get("id")
             attributes = item.get("attributes", {})
 
-            # استخراج العنوان باللغة الإنجليزية أو الأصلية
+            # استخراج العنوان
             titles = attributes.get("title", {})
             title = (
                 titles.get("en")
                 or titles.get("ko")
-                or list(titles.values())[0]
-                if titles
-                else "Manhwa"
+                or (list(titles.values())[0] if titles else "Manhwa")
             )
 
-            # استخراج صورة الغلاف
+            # استخراج الغلاف
             cover_file = ""
             for rel in item.get("relationships", []):
                 if rel.get("type") == "cover_art":
@@ -87,7 +86,7 @@ def get_mangas(page: int = 1, query: str = ""):
             mangas.append(
                 {
                     "title": title,
-                    "url": m_id,  # نستخدم معرّف المانجا كرابط
+                    "url": m_id,
                     "cover_url": cover_url,
                 }
             )
@@ -98,26 +97,22 @@ def get_mangas(page: int = 1, query: str = ""):
 
 
 # ========================================================
-# 2. جلب جميع فصول المانهوا باللغة الإنجليزية للترجمة
+# 2. جلب جميع فصول المانهوا بالإنجليزية
 # ========================================================
 @app.get("/api/chapters")
 def get_chapters(manga_url: str):
     m_id = manga_url.strip().strip("/").split("/")[-1]
+    url = (
+        f"{MD_API}/manga/{m_id}/feed?translatedLanguage[]=en"
+        f"&limit=150&order[chapter]=asc&contentRating[]=safe&contentRating[]=suggestive"
+    )
 
     try:
-        # جلب الفصول المترجمة للإنجليزية
-        resp = client.get(
-            f"{MD_API}/manga/{m_id}/feed",
-            params={
-                "translatedLanguage[]": "en",
-                "limit": 150,
-                "order[chapter]": "asc",
-                "contentRating[]": ["safe", "suggestive"],
-            },
-        )
-
+        resp = session.get(url, timeout=20)
         if resp.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to fetch feed")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch feed"
+            )
 
         data = resp.json().get("data", [])
         chapters = []
@@ -149,14 +144,14 @@ def get_chapters(manga_url: str):
 
 
 # ========================================================
-# 3. جلب جميع روابط صور الفصل عالية الدقة
+# 3. جلب جميع روابط صور الفصل
 # ========================================================
 @app.get("/api/pages")
 def get_pages(chapter_url: str):
     ch_id = chapter_url.strip().strip("/").split("/")[-1]
 
     try:
-        resp = client.get(f"{MD_API}/at-home/server/{ch_id}")
+        resp = session.get(f"{MD_API}/at-home/server/{ch_id}", timeout=20)
         if resp.status_code != 200:
             raise HTTPException(
                 status_code=500, detail="Failed to fetch pages"
@@ -175,12 +170,12 @@ def get_pages(chapter_url: str):
 
 
 # ========================================================
-# 4. بروكسي الصور لضمان عدم حدوث أي حظر
+# 4. بروكسي تحميل الصور
 # ========================================================
 @app.get("/api/proxy-image")
 def proxy_image(url: str):
     try:
-        resp = client.get(url, timeout=15)
+        resp = session.get(url, timeout=15)
         content_type = resp.headers.get("content-type", "image/jpeg")
         return Response(content=resp.content, media_type=content_type)
     except Exception:
