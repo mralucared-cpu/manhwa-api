@@ -4,7 +4,7 @@ from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="1.1.0")
+app = FastAPI(title="Manhwa Arabic API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,7 +27,7 @@ def home():
 
 
 # ========================================================
-# 1. جلب قائمة المانهوات (يدعم الصفحات والبحث الفوري)
+# 1. جلب الكتالوج الضخم الحقيقي (يدعم الصفحات والبحث)
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
@@ -35,13 +35,10 @@ def get_mangas(page: int = 1, query: str = ""):
 
     if query:
         encoded = urllib.parse.quote(query)
-        # استخدام مسار البحث المباشر السريع الذي يرجع HTML جاهز
-        target_url = f"{BASE_URL}/autocomplete?term={encoded}"
-    elif page == 1:
-        target_url = BASE_URL
+        target_url = f"{BASE_URL}/search/?keyword={encoded}&page={page}"
     else:
-        # ترقيم صفحات التصفح في mgeko يعتمد على results=
-        target_url = f"{BASE_URL}/browse-comics/?results={page}&filter=New"
+        # رابط الكتالوج الكامل والضخم لجميع المانهوات في الموقع
+        target_url = f"{BASE_URL}/browse-comics/?results={page}&filter=Views"
 
     try:
         resp = session.get(
@@ -55,8 +52,8 @@ def get_mangas(page: int = 1, query: str = ""):
         soup = BeautifulSoup(resp.text, "html.parser")
         mangas = []
 
-        # البحث عن كل الروابط التي تشير إلى المانجا
-        for a in soup.select("a[href*='/manga/'], li a"):
+        # استخراج بطاقات المانجا الذكي (يشمل كل أنواع البطاقات والتصنيفات)
+        for a in soup.select("a[href*='/manga/']"):
             href = a.get("href", "")
             if not href or "/manga/" not in href:
                 continue
@@ -66,10 +63,15 @@ def get_mangas(page: int = 1, query: str = ""):
             if href.endswith("/all-chapters/"):
                 href = href.replace("/all-chapters/", "/")
 
+            # البحث عن الصورة سواء بداخل الرابط أو بجانبه
             img = (
                 a.select_one("img")
-                or a.find_previous("img")
-                or a.find_next("img")
+                or (a.parent.select_one("img") if a.parent else None)
+                or (
+                    a.parent.parent.select_one("img")
+                    if a.parent and a.parent.parent
+                    else None
+                )
             )
 
             cover = ""
@@ -95,22 +97,14 @@ def get_mangas(page: int = 1, query: str = ""):
             if not title:
                 title = a.get_text(strip=True)
 
+            # استبعاد الروابط المكررة والغير صالحة
             if (
                 title
                 and len(title) > 2
+                and cover.startswith("http")
                 and not any(m["url"] == href for m in mangas)
             ):
-                mangas.append(
-                    {
-                        "title": title,
-                        "url": href,
-                        "cover_url": (
-                            cover
-                            if cover.startswith("http")
-                            else "https://www.mgeko.cc/static/img/logo_200x200.png"
-                        ),
-                    }
-                )
+                mangas.append({"title": title, "url": href, "cover_url": cover})
 
         return {"page": page, "count": len(mangas), "mangas": mangas}
     except Exception as e:
