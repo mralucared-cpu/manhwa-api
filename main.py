@@ -5,7 +5,7 @@ from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="7.0.0")
+app = FastAPI(title="Manhwa Arabic API", version="8.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,6 +17,34 @@ app.add_middleware(
 
 BASE_URL = "https://www.mgeko.cc"
 session = requests.Session(impersonate="chrome120")
+
+# الكلمات الأيقونية التي يمتلك فيها موقع mgeko مئات المانهوات بدون تكرار
+REAL_PAGE_QUERIES = [
+    "Adapted to Manhwa",
+    "leveling",
+    "magic",
+    "reincarnation",
+    "dragon",
+    "system",
+    "tower",
+    "martial",
+    "hero",
+    "sword",
+    "dungeon",
+    "player",
+    "emperor",
+    "ranker",
+    "necromancer",
+    "academy",
+    "demon",
+    "king",
+    "reborn",
+    "hunter",
+    "return",
+    "cultivation",
+    "regression",
+    "isekai",
+]
 
 
 @app.get("/")
@@ -88,7 +116,6 @@ def extract_mangas_from_html(html_text: str):
             if heading:
                 title = heading.get_text(strip=True)
 
-        # تنظيف شارات NEW و التقييمات مثل NEW5.0 من اسم المانجا
         title = re.sub(r"^NEW\s*[\d.]*\s*", "", title, flags=re.I)
         title = re.sub(r"^HOT\s*", "", title, flags=re.I)
         title = title.strip()
@@ -116,7 +143,7 @@ def extract_mangas_from_html(html_text: str):
 
 
 # ========================================================
-# 1. نظام التصفح الحقيقي للتقليب (صفحة 1، 2، 3، 4...)
+# 1. نظام جلب المانهوات غير المكررة
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
@@ -124,18 +151,16 @@ def get_mangas(page: int = 1, query: str = ""):
 
     if query:
         encoded = urllib.parse.quote(query)
-        target_urls = [f"{BASE_URL}/autocomplete?term={encoded}"]
+        target_urls = [f"{BASE_URL}/search/?keyword={encoded}"]
     elif page <= 1:
-        # الصفحة الأولى: الواجهة + أول صفحة تصفح
-        target_urls = [
-            BASE_URL,
-            f"{BASE_URL}/browse-comics/?sort=recently_added&page=1",
-        ]
+        # الصفحة الأولى: الواجهة الرسمية
+        target_urls = [BASE_URL]
     else:
-        # الصفحات التالية عند السحب لأسفل: صفحة 2، صفحة 3، صفحة 4...
-        target_urls = [
-            f"{BASE_URL}/browse-comics/?sort=recently_added&page={page}"
-        ]
+        # الصفحات التالية عند السحب: كلمات مفتاحية ضخمة تضمن مانهوات فريدة وجديدة
+        idx = (page - 2) % len(REAL_PAGE_QUERIES)
+        q = REAL_PAGE_QUERIES[idx]
+        encoded = urllib.parse.quote(q)
+        target_urls = [f"{BASE_URL}/search/?keyword={encoded}"]
 
     all_mangas = []
 
