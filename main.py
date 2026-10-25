@@ -4,7 +4,7 @@ from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="3.5.0")
+app = FastAPI(title="Manhwa Arabic API", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,13 +102,11 @@ def get_mangas(page: int = 1, query: str = ""):
         encoded = urllib.parse.quote(query)
         target_urls = [f"{BASE_URL}/autocomplete?term={encoded}"]
     elif page == 1:
-        # في الصفحة الأولى ندمج الواجهة مع بداية الكتالوج لنعطيك قائمة أولية ممتلئة
         target_urls = [
             f"{BASE_URL}",
             f"{BASE_URL}/browse-comics/?sort=recently_added&page=1",
         ]
     else:
-        # تقليب الصفحات الحقيقي: صفحة 2، صفحة 3، صفحة 4...
         target_urls = [
             f"{BASE_URL}/browse-comics/?sort=recently_added&page={page}"
         ]
