@@ -7,7 +7,7 @@ import urllib.request
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Complete Manhwa Arabic API", version="17.0.0")
+app = FastAPI(title="Global Manhwa Arabic API", version="18.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,49 +17,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_URL = "https://manganato.com"
-CHAP_URL = "https://chapmanganato.to"
+MD_API = "https://api.mangadex.org"
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://chapmanganato.to/",
-}
 
-
-class SmartRedirectHandler(urllib.request.HTTPRedirectHandler):
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new_req:
-            new_req.headers["User-Agent"] = req.headers.get("User-Agent")
-            new_req.headers["Referer"] = "https://chapmanganato.to/"
-        return new_req
-
-
-opener = urllib.request.build_opener(
-    SmartRedirectHandler(), urllib.request.HTTPSHandler(context=ssl_ctx)
-)
-
-
-def fetch_html(url: str, referer: str = "https://chapmanganato.to/"):
-    req_headers = HEADERS.copy()
-    req_headers["Referer"] = referer
-
-    req = urllib.request.Request(url, headers=req_headers)
+def fetch_json(url: str):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+        },
+    )
     try:
-        with opener.open(req, timeout=25) as resp:
+        with urllib.request.urlopen(req, timeout=25, context=ssl_ctx) as resp:
             raw = resp.read()
             if raw.startswith(b"\x1f\x8b"):
                 raw = gzip.decompress(raw)
-            return raw.decode("utf-8", errors="ignore")
+            return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=e.code, detail=err)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -68,184 +53,156 @@ def fetch_html(url: str, referer: str = "https://chapmanganato.to/"):
 def home():
     return {
         "status": "online",
-        "message": "Complete Manhwa (Chapter 1 to End) API is Live! 🚀",
+        "message": "Global Manhwa API is Running Successfully! 🚀",
     }
 
 
 # ========================================================
-# 1. جلب المانهوات الكورية الأكثر شهرة مع التقليب اللانهائي
+# 1. جلب آلاف المانهوات الكورية مع دعم كامل للتقليب
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
-    query = query.strip()
+    limit = 24
+    offset = max(0, (page - 1) * limit)
 
-    if query:
-        clean_q = re.sub(r"[^a-zA-Z0-9 ]", "", query).replace(" ", "_")
-        target_url = f"https://manganato.com/search/story/{clean_q}?page={page}"
+    params = [
+        ("limit", limit),
+        ("offset", offset),
+        ("originalLanguage[]", "ko"),
+        ("includes[]", "cover_art"),
+        ("contentRating[]", "safe"),
+        ("contentRating[]", "suggestive"),
+    ]
+
+    if query.strip():
+        params.append(("title", query.strip()))
     else:
-        target_url = f"https://manganato.com/genre-all/{page}?type=topview&category=all"
+        params.append(("order[followedCount]", "desc"))
 
-    html = fetch_html(target_url, referer="https://manganato.com/")
+    query_string = urllib.parse.urlencode(params)
+    target_url = f"{MD_API}/manga?{query_string}"
+
+    data_json = fetch_json(target_url)
+    data = data_json.get("data", [])
     mangas = []
 
-    # استخراج عناصر المانجا عبر بايثون الصافي بدون الحاجة لمكتبة bs4
-    cards = re.findall(
-        r'<div class="(?:content-genres-item|search-story-item)"[\s\S]*?</div>\s*</div>',
-        html,
-    )
+    for item in data:
+        m_id = item.get("id")
+        attributes = item.get("attributes", {})
+        titles = attributes.get("title", {})
 
-    for block in cards:
-        title_match = re.search(
-            r'<a[^>]*class="[^"]*genres-item-name[^"]*"[^>]*href="([^"]+)"[^>]*title="([^"]+)"',
-            block,
-        )
-        if not title_match:
-            title_match = re.search(
-                r'<h3[^>]*><a[^>]*href="([^"]+)"[^>]*title="([^"]+)"', block
-            )
-        if not title_match:
-            title_match = re.search(
-                r'<a[^>]*href="([^"]*manga-[^"]*)"[^>]*title="([^"]+)"', block
-            )
-
-        img_match = re.search(r'<img[^>]*(?:src|data-src)="([^"]+)"', block)
-        chap_match = re.search(
-            r'<a[^>]*class="[^"]*genres-item-chap[^"]*"[^>]*>([^<]+)</a>',
-            block,
+        title = (
+            titles.get("en")
+            or titles.get("ko-ro")
+            or titles.get("ko")
+            or (list(titles.values())[0] if titles else "Manhwa")
         )
 
-        if title_match:
-            href = title_match.group(1).strip()
-            title = title_match.group(2).strip()
-            cover = img_match.group(1).strip() if img_match else ""
-            last_ch = (
-                chap_match.group(1).strip() if chap_match else "الفصل متاح"
-            )
+        cover_file = ""
+        for rel in item.get("relationships", []):
+            if rel.get("type") == "cover_art":
+                cover_file = rel.get("attributes", {}).get("fileName", "")
+                break
 
-            # توجيه مباشر إلى سيرفر الفصول
-            href = href.replace(
-                "https://manganato.com/manga-",
-                "https://chapmanganato.to/manga-",
-            )
+        if cover_file and m_id:
+            cover_url = f"https://uploads.mangadex.org/covers/{m_id}/{cover_file}.256.jpg"
+        else:
+            cover_url = "https://mangadex.org/img/avatar.png"
 
-            if not any(m["url"] == href for m in mangas):
-                mangas.append(
-                    {
-                        "title": title,
-                        "url": href,
-                        "cover_url": cover,
-                        "latestChapter": last_ch,
-                    }
-                )
-
-    # خطة بديلة لضمان عدم خلو القائمة أبداً
-    if not mangas:
-        for m in re.finditer(
-            r'<a[^>]*href="([^"]*manga-[^"]*)"[^>]*title="([^"]+)"[^>]*>',
-            html,
-        ):
-            href = m.group(1).replace(
-                "https://manganato.com/manga-",
-                "https://chapmanganato.to/manga-",
-            )
-            title = m.group(2).strip()
-            if not any(x["url"] == href for x in mangas):
-                mangas.append(
-                    {
-                        "title": title,
-                        "url": href,
-                        "cover_url": "https://manganato.com/favicon.ico",
-                        "latestChapter": "فصول كاملة",
-                    }
-                )
+        mangas.append(
+            {
+                "title": title,
+                "url": m_id,
+                "cover_url": cover_url,
+            }
+        )
 
     return {"page": page, "count": len(mangas), "mangas": mangas}
 
 
 # ========================================================
-# 2. جلب جميع فصول المانهوا كاملة من الفصل 1 حتى الأخير
+# 2. جلب جميع فصول المانهوا بالكامل من الفصل 1 تصاعدياً
 # ========================================================
 @app.get("/api/chapters")
 def get_chapters(manga_url: str):
-    clean_url = manga_url.strip()
-    if not clean_url.startswith("http"):
-        clean_url = f"https://chapmanganato.to/{clean_url}"
-
-    clean_url = clean_url.replace(
-        "https://manganato.com/", "https://chapmanganato.to/"
-    ).replace("https://readmanganato.com/", "https://chapmanganato.to/")
-
-    html = fetch_html(clean_url, referer="https://chapmanganato.to/")
+    clean_id = manga_url.strip().strip("/").split("/")[-1]
     chapters = []
-    temp_list = []
+    seen = set()
 
-    # استخراج كل الروابط التي تحتوي على كلمة chapter من الفصل 1
-    chapter_matches = re.finditer(
-        r'<a[^>]*class="[^"]*chapter-name[^"]*"[^>]*href="([^"]+)"[^>]*>([^<]+)</a>',
-        html,
-    )
-    for m in chapter_matches:
-        href = m.group(1).strip()
-        title = m.group(2).strip()
+    # محاولة 1: جلب الفصول باللغة الإنجليزية حتى 500 فصل
+    langs_to_try = [["en"], ["en", "null"], []]
 
-        num_match = re.findall(r"chapter[ -_]+(\d+(?:\.\d+)?)", href, re.I)
-        if not num_match:
-            num_match = re.findall(r"\d+(?:\.\d+)?", title)
-        val = float(num_match[0]) if num_match else 99999.0
+    for langs in langs_to_try:
+        params = [
+            ("limit", 500),
+            ("order[chapter]", "asc"),
+            ("contentRating[]", "safe"),
+            ("contentRating[]", "suggestive"),
+        ]
+        for l in langs:
+            params.append(("translatedLanguage[]", l))
 
-        if not any(c[2] == href for c in temp_list):
-            temp_list.append((val, title, href))
+        query_string = urllib.parse.urlencode(params)
+        url = f"{MD_API}/manga/{clean_id}/feed?{query_string}"
 
-    # خطة استخراج بديلة لجميع أشكال الروابط
-    if not temp_list:
-        for m in re.finditer(
-            r'<a[^>]*href="([^"]*chapter[^"]*)"[^>]*>([^<]+)</a>', html
-        ):
-            href = m.group(1).strip()
-            title = m.group(2).strip()
-            if "manga-" in href and len(title) > 0:
-                num_match = re.findall(r"\d+(?:\.\d+)?", href)
-                val = float(num_match[0]) if num_match else 99999.0
-                if not any(c[2] == href for c in temp_list):
-                    temp_list.append((val, title, href))
+        try:
+            data_json = fetch_json(url)
+            data = data_json.get("data", [])
+            temp_list = []
 
-    # الترتيب تصاعدياً من الفصل 1 إلى الأخير
-    temp_list.sort(key=lambda x: x[0])
+            for ch in data:
+                ch_id = ch.get("id")
+                attr = ch.get("attributes", {})
+                ch_num = attr.get("chapter")
+                ch_title = attr.get("title")
 
-    for val, name, href in temp_list:
-        chapters.append({"title": name, "url": href})
+                if not ch_id:
+                    continue
+
+                if ch_num:
+                    name = f"الفصل {ch_num}" + (f" - {ch_title}" if ch_title else "")
+                    num_match = re.findall(r"\d+(?:\.\d+)?", str(ch_num))
+                    val = float(num_match[0]) if num_match else 99999.0
+                else:
+                    name = ch_title or "فصل"
+                    val = 99999.0
+
+                key = f"{ch_num}" if ch_num else ch_id
+                if key not in seen:
+                    seen.add(key)
+                    temp_list.append((val, name, ch_id))
+
+            temp_list.sort(key=lambda x: x[0])
+            for val, name, ch_id in temp_list:
+                chapters.append({"title": name, "url": ch_id})
+
+            if chapters:
+                break
+        except Exception:
+            continue
 
     return {"total": len(chapters), "chapters": chapters}
 
 
 # ========================================================
-# 3. جلب جميع صفحات الفصل عالية الدقة
+# 3. جلب جميع روابط صور الفصل
 # ========================================================
 @app.get("/api/pages")
 def get_pages(chapter_url: str):
-    clean_url = chapter_url.strip()
-    html = fetch_html(clean_url, referer="https://chapmanganato.to/")
+    clean_id = chapter_url.strip().strip("/").split("/")[-1]
+    data = fetch_json(f"{MD_API}/at-home/server/{clean_id}")
 
-    reader_block = re.search(
-        r'<div[^>]*class="[^"]*(?:container-chapter-reader|panel-read-story)[^"]*"[\s\S]*?</div>',
-        html,
-    )
-    block = reader_block.group(0) if reader_block else html
+    base_url = data.get("baseUrl")
+    chapter_data = data.get("chapter", {})
+    hash_code = chapter_data.get("hash")
+    files = chapter_data.get("data", [])
 
-    img_matches = re.findall(
-        r'<img[^>]*(?:src|data-src)="([^"]+)"', block, re.I
-    )
-    images = [
-        src.strip()
-        for src in img_matches
-        if "logo" not in src.lower() and src.strip().startswith("http")
-    ]
-
+    images = [f"{base_url}/data/{hash_code}/{f}" for f in files]
     return {"total_pages": len(images), "images": images}
 
 
 # ========================================================
-# 4. بروكسي تحميل الصور وتخطي حماية الموقع
+# 4. بروكسي تحميل الصور
 # ========================================================
 @app.get("/api/proxy-image")
 def proxy_image(url: str):
@@ -255,14 +212,13 @@ def proxy_image(url: str):
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://chapmanganato.to/",
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
         },
     )
     try:
-        with opener.open(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
             content_type = resp.headers.get("Content-Type", "image/jpeg")
-            return Response(content=resp.content, media_type=content_type)
+            return Response(content=resp.read(), media_type=content_type)
     except Exception:
         raise HTTPException(status_code=404, detail="Image not found")
