@@ -7,7 +7,7 @@ import urllib.request
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Complete Manhwa Arabic API", version="21.0.0")
+app = FastAPI(title="Global Manhwa Arabic API", version="22.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,30 +17,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SOURCE_URL = "https://mangaclash.com"
+MD_API = "https://api.mangadex.org"
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
 
-def fetch_html(url: str, referer: str = "https://mangaclash.com/"):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Referer": referer,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    req = urllib.request.Request(url, headers=headers)
+def fetch_json(url: str):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ManhwaArabicApp/1.0 (Android)",
+            "Accept": "application/json",
+        },
+    )
     try:
         with urllib.request.urlopen(req, timeout=25, context=ssl_ctx) as resp:
             raw = resp.read()
             if raw.startswith(b"\x1f\x8b"):
                 raw = gzip.decompress(raw)
-            return raw.decode("utf-8", errors="ignore")
+            return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=e.code, detail=err)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -49,198 +49,163 @@ def fetch_html(url: str, referer: str = "https://mangaclash.com/"):
 def home():
     return {
         "status": "online",
-        "message": "Complete Manhwa (Chapter 1 to End) API is Live! 🚀",
+        "message": "Global Manhwa API is Running with Real Covers! 🚀",
     }
 
 
 # ========================================================
-# 1. جلب المانهوات الكورية الأكثر شهرة مع التقليب اللانهائي
+# 1. جلب المانهوات الكورية مع الأغلفة الملونة الحقيقية
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
-    query = query.strip()
+    limit = 24
+    offset = max(0, (page - 1) * limit)
 
-    if query:
-        encoded = urllib.parse.quote(query)
-        target_url = f"{SOURCE_URL}/page/{page}/?s={encoded}&post_type=wp-manga"
+    params = [
+        ("limit", limit),
+        ("offset", offset),
+        ("originalLanguage[]", "ko"),
+        ("includes[]", "cover_art"),
+        ("contentRating[]", "safe"),
+        ("contentRating[]", "suggestive"),
+    ]
+
+    if query.strip():
+        params.append(("title", query.strip()))
     else:
-        # ترتيب حسب المشاهدات والأكثر شعبية
-        target_url = f"{SOURCE_URL}/manga-genre/manhwa/page/{page}/?m_orderby=views"
+        # ترتيب حسب الأكثر شعبية ومتابعة
+        params.append(("order[followedCount]", "desc"))
 
-    html = fetch_html(target_url)
+    query_string = urllib.parse.urlencode(params)
+    target_url = f"{MD_API}/manga?{query_string}"
+
+    data_json = fetch_json(target_url)
+    data = data_json.get("data", [])
     mangas = []
 
-    # استخراج الكروت بواسطة بايثون المدمج
-    items = re.findall(
-        r'<div[^>]*class="[^"]*(?:page-item-detail|badge-pos-1)[^"]*"[\s\S]*?</div>\s*</div>\s*</div>',
-        html,
-    )
-    if not items:
-        items = re.findall(
-            r'<div[^>]*class="[^"]*item-thumb[^"]*"[\s\S]*?</div>\s*</div>',
-            html,
+    for item in data:
+        m_id = item.get("id")
+        attributes = item.get("attributes", {})
+        titles = attributes.get("title", {})
+
+        title = (
+            titles.get("en")
+            or titles.get("ko-ro")
+            or titles.get("ko")
+            or (list(titles.values())[0] if titles else "Manhwa")
         )
 
-    for block in items:
-        # استخراج الرابط والعنوان
-        title_match = re.search(
-            r'<h3[^>]*class="[^"]*h5[^"]*"[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([^<]+)</a>',
-            block,
+        cover_file = ""
+        for rel in item.get("relationships", []):
+            if rel.get("type") == "cover_art":
+                cover_file = rel.get("attributes", {}).get("fileName", "")
+                break
+
+        # استخدام الرابط المباشر للغلاف المصغر
+        if cover_file and m_id:
+            cover_url = f"https://uploads.mangadex.org/covers/{m_id}/{cover_file}.256.jpg"
+        else:
+            cover_url = "https://mangadex.org/img/avatar.png"
+
+        mangas.append(
+            {
+                "title": title,
+                "url": m_id,
+                "cover_url": cover_url,
+            }
         )
-        if not title_match:
-            title_match = re.search(
-                r'<a[^>]*href="([^"]+/manga/[^"]+/)"[^>]*title="([^"]+)"',
-                block,
-            )
-        if not title_match:
-            title_match = re.search(
-                r'<a[^>]*href="([^"]+/manga/[^"]+/)"[^>]*>([^<]+)</a>', block
-            )
-
-        # استخراج صورة الغلاف الأصلية
-        img_match = re.search(r'<img[^>]*(?:data-src|src)="([^"]+)"', block)
-
-        # استخراج آخر فصل
-        chap_match = re.search(
-            r'<span[^>]*class="[^"]*chapter[^"]*"[^>]*>\s*<a[^>]*href="[^"]*"[^>]*>([^<]+)</a>',
-            block,
-        )
-
-        if title_match:
-            href = title_match.group(1).strip()
-            title = title_match.group(2).strip()
-            cover = img_match.group(1).strip() if img_match else ""
-            last_ch = (
-                chap_match.group(1).strip() if chap_match else "فصول كاملة"
-            )
-
-            # تنظيف رابط الصورة
-            if cover.startswith("//"):
-                cover = "https:" + cover
-
-            if title and href and not any(m["url"] == href for m in mangas):
-                mangas.append(
-                    {
-                        "title": title,
-                        "url": href,
-                        "cover_url": cover,
-                        "latestChapter": last_ch,
-                    }
-                )
-
-    # خطة بديلة احتياطية لضمان عدم خلو القائمة
-    if not mangas:
-        matches = re.finditer(
-            r'<a[^>]*href="([^"]+/manga/[^"/]+/)"[^>]*>\s*<img[^>]*(?:data-src|src)="([^"]+)"[^>]*alt="([^"]+)"',
-            html,
-        )
-        for m in matches:
-            href = m.group(1).strip()
-            cover = m.group(2).strip()
-            title = m.group(3).strip()
-            if not any(x["url"] == href for x in mangas):
-                mangas.append(
-                    {
-                        "title": title,
-                        "url": href,
-                        "cover_url": cover,
-                        "latestChapter": "فصول كاملة",
-                    }
-                )
 
     return {"page": page, "count": len(mangas), "mangas": mangas}
 
 
 # ========================================================
-# 2. جلب جميع فصول المانهوا كاملة من الفصل 1 حتى الأخير
+# 2. جلب جميع فصول المانهوا بالكامل من الفصل 1 تصاعدياً
 # ========================================================
 @app.get("/api/chapters")
 def get_chapters(manga_url: str):
-    clean_url = manga_url.strip()
-    if not clean_url.endswith("/"):
-        clean_url += "/"
-
-    # موقع MangaClash يضع قائمته الكاملة عبر طلب ajax الفصول لضمان جلب كل الفصول
-    ajax_url = f"{clean_url}ajax/chapters/"
-    try:
-        html = fetch_html(ajax_url, referer=clean_url)
-    except Exception:
-        html = fetch_html(clean_url, referer=clean_url)
-
+    clean_id = manga_url.strip().strip("/").split("/")[-1]
     chapters = []
-    temp_list = []
+    seen = set()
 
-    matches = re.finditer(
-        r'<li[^>]*class="[^"]*wp-manga-chapter[^"]*"[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([^<]+)</a>',
-        html,
-    )
-    for m in matches:
-        href = m.group(1).strip()
-        title = m.group(2).strip()
+    params = [
+        ("limit", 500),
+        ("order[chapter]", "asc"),
+        ("contentRating[]", "safe"),
+        ("contentRating[]", "suggestive"),
+        ("translatedLanguage[]", "en"),
+    ]
 
-        # استخراج رقم الفصل لترتيبه تصاعدياً من الفصل 1
-        num_match = re.findall(r"chapter[ -_]+(\d+(?:\.\d+)?)", href, re.I)
-        if not num_match:
-            num_match = re.findall(r"\d+(?:\.\d+)?", title)
+    query_string = urllib.parse.urlencode(params)
+    url = f"{MD_API}/manga/{clean_id}/feed?{query_string}"
 
-        val = float(num_match[0]) if num_match else 99999.0
+    try:
+        data_json = fetch_json(url)
+        data = data_json.get("data", [])
+        temp_list = []
 
-        if not any(c[2] == href for c in temp_list):
-            temp_list.append((val, title, href))
+        for ch in data:
+            ch_id = ch.get("id")
+            attr = ch.get("attributes", {})
+            ch_num = attr.get("chapter")
+            ch_title = attr.get("title")
 
-    # الترتيب تصاعدياً من الفصل 1 إلى الأخير
-    temp_list.sort(key=lambda x: x[0])
+            if not ch_id:
+                continue
 
-    for val, name, href in temp_list:
-        chapters.append({"title": name, "url": href})
+            if ch_num:
+                name = f"الفصل {ch_num}" + (f" - {ch_title}" if ch_title else "")
+                num_match = re.findall(r"\d+(?:\.\d+)?", str(ch_num))
+                val = float(num_match[0]) if num_match else 99999.0
+            else:
+                name = ch_title or "فصل"
+                val = 99999.0
+
+            key = f"{ch_num}" if ch_num else ch_id
+            if key not in seen:
+                seen.add(key)
+                temp_list.append((val, name, ch_id))
+
+        # ترتيب الفصول رقمياً لتظهر من الفصل 1 تصاعدياً
+        temp_list.sort(key=lambda x: x[0])
+        for val, name, ch_id in temp_list:
+            chapters.append({"title": name, "url": ch_id})
+    except Exception:
+        pass
 
     return {"total": len(chapters), "chapters": chapters}
 
 
 # ========================================================
-# 3. جلب جميع صفحات الفصل عالية الدقة للقراءة والترجمة
+# 3. جلب جميع صفحات الفصل
 # ========================================================
 @app.get("/api/pages")
 def get_pages(chapter_url: str):
-    clean_url = chapter_url.strip()
-    html = fetch_html(clean_url, referer=clean_url)
+    clean_id = chapter_url.strip().strip("/").split("/")[-1]
+    data = fetch_json(f"{MD_API}/at-home/server/{clean_id}")
 
-    img_matches = re.findall(
-        r'<img[^>]*(?:data-src|src)="([^"]+)"[^>]*class="[^"]*wp-manga-chapter-img[^"]*"',
-        html,
-    )
-    if not img_matches:
-        img_matches = re.findall(
-            r'<div[^>]*class="[^"]*page-break[^"]*"[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+)"',
-            html,
-        )
+    base_url = data.get("baseUrl")
+    chapter_data = data.get("chapter", {})
+    hash_code = chapter_data.get("hash")
+    files = chapter_data.get("data", [])
 
-    images = [
-        src.strip()
-        for src in img_matches
-        if "logo" not in src.lower() and src.strip().startswith("http")
-    ]
-
+    images = [f"{base_url}/data/{hash_code}/{f}" for f in files]
     return {"total_pages": len(images), "images": images}
 
 
 # ========================================================
-# 4. بروكسي تحميل الصور بدون أي حظر
+# 4. بروكسي الصور متوافق مع نظام حماية MangaDex
 # ========================================================
 @app.get("/api/proxy-image")
 def proxy_image(url: str):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Referer": SOURCE_URL,
+    # إرسال ترويسة تطبيق مستقلة تلغي صورة التحذير وتعيد الغلاف الأصلي
+    req_headers = {
+        "User-Agent": "ManhwaArabicApp/1.0 (Android)",
+        "Referer": "https://mangadex.org/",
     }
-    req = urllib.request.Request(url, headers=headers)
+    req = urllib.request.Request(url, headers=req_headers)
     try:
         with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
             content_type = resp.headers.get("Content-Type", "image/jpeg")
-            return Response(content=resp.read(), media_type=content_type)
+            return Response(content=resp.content, media_type=content_type)
     except Exception:
         raise HTTPException(status_code=404, detail="Image not found")
