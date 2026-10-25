@@ -4,7 +4,7 @@ from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="2.5.0")
+app = FastAPI(title="Manhwa Arabic API", version="3.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,12 +40,11 @@ def parse_mangas(html_content: str):
         if href.endswith("/all-chapters/"):
             href = href.replace("/all-chapters/", "/")
 
-        # استخراج الصورة من الرابط أو ما حوله
         img = a.select_one("img")
         if not img and a.parent:
             img = a.parent.select_one("img")
-        if not img and a.parent and a.parent.parent:
-            img = a.parent.parent.select_one("img")
+        if not img and a.find_previous("img"):
+            img = a.find_previous("img")
 
         cover = ""
         if img:
@@ -60,19 +59,16 @@ def parse_mangas(html_content: str):
             elif cover.startswith("/"):
                 cover = urllib.parse.urljoin(BASE_URL, cover)
 
-        if not cover:
+        if not cover or not cover.startswith("http"):
             cover = "https://www.mgeko.cc/static/img/logo_200x200.png"
 
-        # استخراج العنوان
         title = ""
         if img and img.get("alt"):
             title = img.get("alt").strip()
         if not title:
-            parent = a.find_parent()
-            if parent:
-                t_el = parent.select_one("h2, h3, h4, .title, .novel-title")
-                if t_el:
-                    title = t_el.get_text(strip=True)
+            t_el = a.select_one("h2, h3, h4, .title, .novel-title, span")
+            if t_el:
+                title = t_el.get_text(strip=True)
         if not title:
             title = a.get_text(strip=True)
 
@@ -96,44 +92,26 @@ def parse_mangas(html_content: str):
 
 
 # ========================================================
-# 1. جلب مئات المانهوات بتوزيع ذكي للصفحات
+# 1. نظام الصفحات الحقيقي (الصفحة 1، 2، 3، 4...)
 # ========================================================
-PAGES_MAP = {
-    1: [f"{BASE_URL}", f"{BASE_URL}/search/?keyword=leveling"],
-    2: [
-        f"{BASE_URL}/search/?keyword=solo",
-        f"{BASE_URL}/search/?keyword=magic",
-    ],
-    3: [
-        f"{BASE_URL}/search/?keyword=reincarnation",
-        f"{BASE_URL}/search/?keyword=hero",
-    ],
-    4: [
-        f"{BASE_URL}/search/?keyword=dragon",
-        f"{BASE_URL}/search/?keyword=martial",
-    ],
-    5: [
-        f"{BASE_URL}/search/?keyword=tower",
-        f"{BASE_URL}/search/?keyword=system",
-    ],
-    6: [
-        f"{BASE_URL}/search/?keyword=sword",
-        f"{BASE_URL}/search/?keyword=player",
-    ],
-}
-
-
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
     query = query.strip()
 
     if query:
         encoded = urllib.parse.quote(query)
-        target_urls = [f"{BASE_URL}/search/?keyword={encoded}"]
+        target_urls = [f"{BASE_URL}/autocomplete?term={encoded}"]
+    elif page == 1:
+        # في الصفحة الأولى ندمج الواجهة مع بداية الكتالوج لنعطيك قائمة أولية ممتلئة
+        target_urls = [
+            f"{BASE_URL}",
+            f"{BASE_URL}/browse-comics/?sort=recently_added&page=1",
+        ]
     else:
-        target_urls = PAGES_MAP.get(
-            page, [f"{BASE_URL}/search/?keyword=manga"]
-        )
+        # تقليب الصفحات الحقيقي: صفحة 2، صفحة 3، صفحة 4...
+        target_urls = [
+            f"{BASE_URL}/browse-comics/?sort=recently_added&page={page}"
+        ]
 
     all_mangas = []
 
