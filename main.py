@@ -1,11 +1,8 @@
-import re
-import urllib.parse
-from bs4 import BeautifulSoup
-from curl_cffi import requests
+import httpx
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="8.0.0")
+app = FastAPI(title="Global Manhwa Arabic API", version="10.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,261 +12,175 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_URL = "https://www.mgeko.cc"
-session = requests.Session(impersonate="chrome120")
-
-# الكلمات الأيقونية التي يمتلك فيها موقع mgeko مئات المانهوات بدون تكرار
-REAL_PAGE_QUERIES = [
-    "Adapted to Manhwa",
-    "leveling",
-    "magic",
-    "reincarnation",
-    "dragon",
-    "system",
-    "tower",
-    "martial",
-    "hero",
-    "sword",
-    "dungeon",
-    "player",
-    "emperor",
-    "ranker",
-    "necromancer",
-    "academy",
-    "demon",
-    "king",
-    "reborn",
-    "hunter",
-    "return",
-    "cultivation",
-    "regression",
-    "isekai",
-]
+MD_API = "https://api.mangadex.org"
+client = httpx.Client(timeout=20.0, follow_redirects=True)
 
 
 @app.get("/")
 def home():
     return {
         "status": "online",
-        "message": "Manhwa Arabic Cloud Server is Running Successfully! 🚀",
+        "message": "Global Manhwa API is Running Successfully! 🚀",
     }
 
 
-def extract_mangas_from_html(html_text: str):
-    soup = BeautifulSoup(html_text, "html.parser")
-    mangas = []
-
-    for a in soup.select("a[href*='/manga/']"):
-        href = a.get("href", "")
-        if not href or href in [
-            "/manga/",
-            "/manga",
-            "/manga/all-chapters/",
-            f"{BASE_URL}/manga/",
-        ]:
-            continue
-
-        if not href.startswith("http"):
-            href = urllib.parse.urljoin(BASE_URL, href)
-        if href.endswith("/all-chapters/"):
-            href = href.replace("/all-chapters/", "/")
-
-        if any(m["url"] == href for m in mangas):
-            continue
-
-        container = a.find_parent(
-            lambda tag: tag.name in ["li", "div", "article"]
-            and tag.select_one("img") is not None
-        )
-        if not container:
-            container = a.parent
-
-        img = a.select_one("img")
-        if not img and container:
-            img = container.select_one("img")
-
-        cover = ""
-        if img:
-            cover = (
-                img.get("data-src")
-                or img.get("data-lazy-src")
-                or img.get("src")
-                or ""
-            ).strip()
-            if cover.startswith("//"):
-                cover = "https:" + cover
-            elif cover.startswith("/"):
-                cover = urllib.parse.urljoin(BASE_URL, cover)
-
-        if not cover or not cover.startswith("http"):
-            cover = "https://www.mgeko.cc/static/img/logo_200x200.png"
-
-        title = ""
-        if a.get_text(strip=True):
-            title = a.get_text(strip=True)
-        if (not title or len(title) < 2) and img and img.get("alt"):
-            title = img.get("alt").strip()
-        if (not title or len(title) < 2) and container:
-            heading = container.select_one(
-                "h1, h2, h3, h4, h5, .title, .novel-title"
-            )
-            if heading:
-                title = heading.get_text(strip=True)
-
-        title = re.sub(r"^NEW\s*[\d.]*\s*", "", title, flags=re.I)
-        title = re.sub(r"^HOT\s*", "", title, flags=re.I)
-        title = title.strip()
-
-        ignore_words = [
-            "read now",
-            "read manga",
-            "manga",
-            "view more",
-            "details",
-            "all chapters",
-            "read",
-            "chapters",
-        ]
-
-        if (
-            title
-            and len(title) > 2
-            and title.lower() not in ignore_words
-            and not title.lower().startswith("chapter")
-        ):
-            mangas.append({"title": title, "url": href, "cover_url": cover})
-
-    return mangas
-
-
 # ========================================================
-# 1. نظام جلب المانهوات غير المكررة
+# 1. جلب آلاف المانهوات الحقيقية مع دعم كامل للتقليب والسحب
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
-    query = query.strip()
+    limit = 24
+    offset = max(0, (page - 1) * limit)
 
-    if query:
-        encoded = urllib.parse.quote(query)
-        target_urls = [f"{BASE_URL}/search/?keyword={encoded}"]
-    elif page <= 1:
-        # الصفحة الأولى: الواجهة الرسمية
-        target_urls = [BASE_URL]
+    params = {
+        "limit": limit,
+        "offset": offset,
+        "originalLanguage[]": "ko",  # مانهوا كورية فقط
+        "includes[]": "cover_art",
+        "contentRating[]": ["safe", "suggestive"],
+    }
+
+    if query.strip():
+        params["title"] = query.strip()
     else:
-        # الصفحات التالية عند السحب: كلمات مفتاحية ضخمة تضمن مانهوات فريدة وجديدة
-        idx = (page - 2) % len(REAL_PAGE_QUERIES)
-        q = REAL_PAGE_QUERIES[idx]
-        encoded = urllib.parse.quote(q)
-        target_urls = [f"{BASE_URL}/search/?keyword={encoded}"]
+        # ترتيب حسب الأكثر شهرة ومتابعة عالمياً
+        params["order[followedCount]"] = "desc"
 
-    all_mangas = []
+    try:
+        resp = client.get(f"{MD_API}/manga", params=params)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=resp.status_code, detail="MangaDex error"
+            )
 
-    for url in target_urls:
-        try:
-            resp = session.get(url, headers={"Referer": BASE_URL}, timeout=15)
-            if resp.status_code == 200:
-                extracted = extract_mangas_from_html(resp.text)
-                for item in extracted:
-                    if not any(m["url"] == item["url"] for m in all_mangas):
-                        all_mangas.append(item)
-        except Exception:
-            continue
+        data = resp.json().get("data", [])
+        mangas = []
 
-    return {"page": page, "count": len(all_mangas), "mangas": all_mangas}
+        for item in data:
+            m_id = item.get("id")
+            attributes = item.get("attributes", {})
+
+            # استخراج العنوان باللغة الإنجليزية أو الأصلية
+            titles = attributes.get("title", {})
+            title = (
+                titles.get("en")
+                or titles.get("ko")
+                or list(titles.values())[0]
+                if titles
+                else "Manhwa"
+            )
+
+            # استخراج صورة الغلاف
+            cover_file = ""
+            for rel in item.get("relationships", []):
+                if rel.get("type") == "cover_art":
+                    cover_file = rel.get("attributes", {}).get("fileName", "")
+                    break
+
+            if cover_file and m_id:
+                cover_url = (
+                    f"https://uploads.mangadex.org/covers/{m_id}/{cover_file}"
+                )
+            else:
+                cover_url = "https://mangadex.org/img/avatar.png"
+
+            mangas.append(
+                {
+                    "title": title,
+                    "url": m_id,  # نستخدم معرّف المانجا كرابط
+                    "cover_url": cover_url,
+                }
+            )
+
+        return {"page": page, "count": len(mangas), "mangas": mangas}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ========================================================
-# 2. جلب جميع فصول أي مانجا
+# 2. جلب جميع فصول المانهوا باللغة الإنجليزية للترجمة
 # ========================================================
 @app.get("/api/chapters")
 def get_chapters(manga_url: str):
-    clean_url = manga_url.strip()
-    if not clean_url.startswith("http"):
-        clean_url = f"{BASE_URL}/manga/{clean_url}/"
-
-    all_chapters_url = clean_url.rstrip("/") + "/all-chapters/"
-    chapters = []
+    m_id = manga_url.strip().strip("/").split("/")[-1]
 
     try:
-        resp = session.get(
-            all_chapters_url, headers={"Referer": BASE_URL}, timeout=12
+        # جلب الفصول المترجمة للإنجليزية
+        resp = client.get(
+            f"{MD_API}/manga/{m_id}/feed",
+            params={
+                "translatedLanguage[]": "en",
+                "limit": 150,
+                "order[chapter]": "asc",
+                "contentRating[]": ["safe", "suggestive"],
+            },
         )
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for a in soup.select("a[href*='/reader/']"):
-                title = a.get_text(strip=True)
-                href = a.get("href", "")
-                if not href.startswith("http"):
-                    href = urllib.parse.urljoin(BASE_URL, href)
-                if title and not any(c["url"] == href for c in chapters):
-                    chapters.append({"title": title, "url": href})
-    except Exception:
-        pass
 
-    if not chapters:
-        try:
-            resp = session.get(
-                clean_url, headers={"Referer": BASE_URL}, timeout=12
-            )
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                for a in soup.select(
-                    ".chapter-list a, #chapters-list a, a[href*='/reader/']"
-                ):
-                    title = a.get_text(strip=True)
-                    href = a.get("href", "")
-                    if not href.startswith("http"):
-                        href = urllib.parse.urljoin(BASE_URL, href)
-                    if title and not any(c["url"] == href for c in chapters):
-                        chapters.append({"title": title, "url": href})
-        except Exception:
-            pass
+        if resp.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to fetch feed")
 
-    chapters.reverse()
-    return {"total": len(chapters), "chapters": chapters}
+        data = resp.json().get("data", [])
+        chapters = []
+        seen = set()
+
+        for ch in data:
+            ch_id = ch.get("id")
+            attr = ch.get("attributes", {})
+            ch_num = attr.get("chapter")
+            ch_title = attr.get("title")
+
+            if ch_num:
+                name = (
+                    f"الفصل {ch_num}" + (f" - {ch_title}" if ch_title else "")
+                )
+            elif ch_title:
+                name = ch_title
+            else:
+                name = "فصل"
+
+            if ch_id and ch_num not in seen:
+                if ch_num:
+                    seen.add(ch_num)
+                chapters.append({"title": name, "url": ch_id})
+
+        return {"total": len(chapters), "chapters": chapters}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ========================================================
-# 3. استخراج روابط صور الفصل
+# 3. جلب جميع روابط صور الفصل عالية الدقة
 # ========================================================
 @app.get("/api/pages")
 def get_pages(chapter_url: str):
+    ch_id = chapter_url.strip().strip("/").split("/")[-1]
+
     try:
-        resp = session.get(chapter_url, headers={"Referer": BASE_URL}, timeout=15)
+        resp = client.get(f"{MD_API}/at-home/server/{ch_id}")
         if resp.status_code != 200:
             raise HTTPException(
-                status_code=500, detail="Failed to load chapter pages"
+                status_code=500, detail="Failed to fetch pages"
             )
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        images = []
+        data = resp.json()
+        base_url = data.get("baseUrl")
+        chapter_data = data.get("chapter", {})
+        hash_code = chapter_data.get("hash")
+        files = chapter_data.get("data", [])
 
-        for img in soup.select("#chapter-reader img, .chapter-images img"):
-            src = (
-                img.get("data-src")
-                or img.get("data-lazy-src")
-                or img.get("src")
-                or ""
-            ).strip()
-            if src and "logo" not in src and "ad" not in src:
-                if src.startswith("//"):
-                    src = "https:" + src
-                elif src.startswith("/"):
-                    src = urllib.parse.urljoin(BASE_URL, src)
-                images.append(src)
-
+        images = [f"{base_url}/data/{hash_code}/{f}" for f in files]
         return {"total_pages": len(images), "images": images}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ========================================================
-# 4. بروكسي تحميل الصور
+# 4. بروكسي الصور لضمان عدم حدوث أي حظر
 # ========================================================
 @app.get("/api/proxy-image")
 def proxy_image(url: str):
     try:
-        resp = session.get(url, headers={"Referer": BASE_URL}, timeout=10)
+        resp = client.get(url, timeout=15)
         content_type = resp.headers.get("content-type", "image/jpeg")
         return Response(content=resp.content, media_type=content_type)
     except Exception:
