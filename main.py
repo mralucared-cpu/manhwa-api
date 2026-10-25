@@ -7,7 +7,7 @@ import urllib.request
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Global Manhwa Arabic API", version="22.0.0")
+app = FastAPI(title="Global Manhwa Arabic API", version="23.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,15 +49,42 @@ def fetch_json(url: str):
 def home():
     return {
         "status": "online",
-        "message": "Global Manhwa API is Running with Real Covers! 🚀",
+        "message": "Global Manhwa API with Extensions Support is Running! 🚀",
     }
 
 
 # ========================================================
-# 1. جلب المانهوات الكورية مع الأغلفة الملونة الحقيقية
+# 0. قائمة الإضافات والمصادر المتوفرة (Extensions List)
+# ========================================================
+@app.get("/api/extensions")
+def get_extensions():
+    return {
+        "extensions": [
+            {
+                "id": "mangadex",
+                "name": "MangaDex (EN)",
+                "base_url": "https://mangadex.org",
+                "lang": "en",
+                "icon_url": "https://mangadex.org/favicon.ico",
+                "status": "online",
+            },
+            {
+                "id": "mgeko",
+                "name": "MangaGeko (EN)",
+                "base_url": "https://www.mgeko.cc",
+                "lang": "en",
+                "icon_url": "https://www.mgeko.cc/favicon.ico",
+                "status": "online",
+            },
+        ]
+    }
+
+
+# ========================================================
+# 1. جلب المانهوات بحسب المصدر (افتراضياً MangaDex)
 # ========================================================
 @app.get("/api/mangas")
-def get_mangas(page: int = 1, query: str = ""):
+def get_mangas(page: int = 1, query: str = "", source: str = "mangadex"):
     limit = 24
     offset = max(0, (page - 1) * limit)
 
@@ -112,17 +139,18 @@ def get_mangas(page: int = 1, query: str = ""):
                 "title": title,
                 "url": m_id,
                 "cover_url": cover_url,
+                "source": source,
             }
         )
 
-    return {"page": page, "count": len(mangas), "mangas": mangas}
+    return {"page": page, "count": len(mangas), "source": source, "mangas": mangas}
 
 
 # ========================================================
-# 2. جلب جميع فصول المانهوا بالكامل من الفصل 1 تصاعدياً
+# 2. جلب فصول المانهوا بالكامل تصاعدياً
 # ========================================================
 @app.get("/api/chapters")
-def get_chapters(manga_url: str):
+def get_chapters(manga_url: str, source: str = "mangadex"):
     clean_id = manga_url.strip().strip("/").split("/")[-1]
     chapters = []
     seen = set()
@@ -172,14 +200,14 @@ def get_chapters(manga_url: str):
     except Exception:
         pass
 
-    return {"total": len(chapters), "chapters": chapters}
+    return {"total": len(chapters), "source": source, "chapters": chapters}
 
 
 # ========================================================
-# 3. جلب جميع صفحات الفصل
+# 3. جلب صفحات الفصل
 # ========================================================
 @app.get("/api/pages")
-def get_pages(chapter_url: str):
+def get_pages(chapter_url: str, source: str = "mangadex"):
     clean_id = chapter_url.strip().strip("/").split("/")[-1]
     data = fetch_json(f"{MD_API}/at-home/server/{clean_id}")
 
@@ -189,15 +217,14 @@ def get_pages(chapter_url: str):
     files = chapter_data.get("data", [])
 
     images = [f"{base_url}/data/{hash_code}/{f}" for f in files]
-    return {"total_pages": len(images), "images": images}
+    return {"total_pages": len(images), "source": source, "images": images}
 
 
 # ========================================================
-# 4. بروكسي الصور متوافق مع نظام حماية MangaDex
+# 4. بروكسي الصور
 # ========================================================
 @app.get("/api/proxy-image")
 def proxy_image(url: str):
-    # إرسال ترويسة تطبيق مستقلة تلغي صورة التحذير وتعيد الغلاف الأصلي
     req_headers = {
         "User-Agent": "ManhwaArabicApp/1.0 (Android)",
         "Referer": "https://mangadex.org/",
