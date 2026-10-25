@@ -1,10 +1,11 @@
+import re
 import urllib.parse
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="6.0.0")
+app = FastAPI(title="Manhwa Arabic API", version="7.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,40 +18,6 @@ app.add_middleware(
 BASE_URL = "https://www.mgeko.cc"
 session = requests.Session(impersonate="chrome120")
 
-# الكلمات الموجهة لموقع mgeko لجلب مئات المانهوات مع كل تمريرة لأسفل
-SCROLL_QUERIES = [
-    "leveling",
-    "magic",
-    "reincarnation",
-    "dragon",
-    "hero",
-    "martial",
-    "sword",
-    "tower",
-    "system",
-    "dungeon",
-    "player",
-    "ranker",
-    "emperor",
-    "necromancer",
-    "academy",
-    "demon",
-    "king",
-    "villain",
-    "monster",
-    "reborn",
-    "god",
-    "hunter",
-    "return",
-    "knight",
-    "isekai",
-    "regression",
-    "cultivation",
-    "revenge",
-    "overpowered",
-    "awakening",
-]
-
 
 @app.get("/")
 def home():
@@ -60,17 +27,18 @@ def home():
     }
 
 
-# ========================================================
-# المحلل الذكي: يستخرج العنوان والصورة حتى لو كانا في حاويات منفصلة
-# ========================================================
 def extract_mangas_from_html(html_text: str):
     soup = BeautifulSoup(html_text, "html.parser")
     mangas = []
 
-    # البحث عن كل الروابط التي تشير إلى مانهوا
     for a in soup.select("a[href*='/manga/']"):
         href = a.get("href", "")
-        if not href or href in ["/manga/", "/manga", "/manga/all-chapters/"]:
+        if not href or href in [
+            "/manga/",
+            "/manga",
+            "/manga/all-chapters/",
+            f"{BASE_URL}/manga/",
+        ]:
             continue
 
         if not href.startswith("http"):
@@ -78,11 +46,9 @@ def extract_mangas_from_html(html_text: str):
         if href.endswith("/all-chapters/"):
             href = href.replace("/all-chapters/", "/")
 
-        # تجنب التكرار
         if any(m["url"] == href for m in mangas):
             continue
 
-        # العثور على الحاوية الأب (Card Container) التي تجمع الصورة والعنوان معاً
         container = a.find_parent(
             lambda tag: tag.name in ["li", "div", "article"]
             and tag.select_one("img") is not None
@@ -90,7 +56,6 @@ def extract_mangas_from_html(html_text: str):
         if not container:
             container = a.parent
 
-        # 1. استخراج الصورة
         img = a.select_one("img")
         if not img and container:
             img = container.select_one("img")
@@ -111,21 +76,22 @@ def extract_mangas_from_html(html_text: str):
         if not cover or not cover.startswith("http"):
             cover = "https://www.mgeko.cc/static/img/logo_200x200.png"
 
-        # 2. استخراج العنوان
         title = ""
-        # من نص الرابط نفسه
         if a.get_text(strip=True):
             title = a.get_text(strip=True)
-        # أو من alt الخاص بالصورة
         if (not title or len(title) < 2) and img and img.get("alt"):
             title = img.get("alt").strip()
-        # أو من عناوين الحاوية
         if (not title or len(title) < 2) and container:
             heading = container.select_one(
                 "h1, h2, h3, h4, h5, .title, .novel-title"
             )
             if heading:
                 title = heading.get_text(strip=True)
+
+        # تنظيف شارات NEW و التقييمات مثل NEW5.0 من اسم المانجا
+        title = re.sub(r"^NEW\s*[\d.]*\s*", "", title, flags=re.I)
+        title = re.sub(r"^HOT\s*", "", title, flags=re.I)
+        title = title.strip()
 
         ignore_words = [
             "read now",
@@ -150,7 +116,7 @@ def extract_mangas_from_html(html_text: str):
 
 
 # ========================================================
-# 1. نقطة جلب المانهوا (واجهة + سحب لأسفل مستمر)
+# 1. نظام التصفح الحقيقي للتقليب (صفحة 1، 2، 3، 4...)
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
@@ -158,29 +124,33 @@ def get_mangas(page: int = 1, query: str = ""):
 
     if query:
         encoded = urllib.parse.quote(query)
-        target_url = f"{BASE_URL}/search/?keyword={encoded}"
+        target_urls = [f"{BASE_URL}/autocomplete?term={encoded}"]
     elif page <= 1:
-        # عند فتح التطبيق: يجلب الواجهة الرئيسية
-        target_url = BASE_URL
+        # الصفحة الأولى: الواجهة + أول صفحة تصفح
+        target_urls = [
+            BASE_URL,
+            f"{BASE_URL}/browse-comics/?sort=recently_added&page=1",
+        ]
     else:
-        # مع كل سحبة لأسفل: يطلب مانهوات جديدة عبر الكلمات المستهدفة
-        idx = (page - 2) % len(SCROLL_QUERIES)
-        keyword = SCROLL_QUERIES[idx]
-        target_url = f"{BASE_URL}/search/?keyword={keyword}"
+        # الصفحات التالية عند السحب لأسفل: صفحة 2، صفحة 3، صفحة 4...
+        target_urls = [
+            f"{BASE_URL}/browse-comics/?sort=recently_added&page={page}"
+        ]
 
-    try:
-        resp = session.get(
-            target_url, headers={"Referer": BASE_URL}, timeout=15
-        )
-        if resp.status_code != 200:
-            raise HTTPException(
-                status_code=resp.status_code, detail="Failed to fetch from site"
-            )
+    all_mangas = []
 
-        mangas = extract_mangas_from_html(resp.text)
-        return {"page": page, "count": len(mangas), "mangas": mangas}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    for url in target_urls:
+        try:
+            resp = session.get(url, headers={"Referer": BASE_URL}, timeout=15)
+            if resp.status_code == 200:
+                extracted = extract_mangas_from_html(resp.text)
+                for item in extracted:
+                    if not any(m["url"] == item["url"] for m in all_mangas):
+                        all_mangas.append(item)
+        except Exception:
+            continue
+
+    return {"page": page, "count": len(all_mangas), "mangas": all_mangas}
 
 
 # ========================================================
