@@ -1,87 +1,5 @@
-import gzip
-import json
-import re
-import ssl
-import urllib.parse
-import urllib.request
-from fastapi import FastAPI, HTTPException, Response
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI(title="Global Manhwa Arabic API", version="23.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-MD_API = "https://api.mangadex.org"
-
-ssl_ctx = ssl.create_default_context()
-ssl_ctx.check_hostname = False
-ssl_ctx.verify_mode = ssl.CERT_NONE
-
-
-def fetch_json(url: str):
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "ManhwaArabicApp/1.0 (Android)",
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=25, context=ssl_ctx) as resp:
-            raw = resp.read()
-            if raw.startswith(b"\x1f\x8b"):
-                raw = gzip.decompress(raw)
-            return json.loads(raw.decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        err = e.read().decode("utf-8", errors="ignore")
-        raise HTTPException(status_code=e.code, detail=err)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/")
-def home():
-    return {
-        "status": "online",
-        "message": "Global Manhwa API with Extensions Support is Running! 🚀",
-    }
-
-
 # ========================================================
-# 0. قائمة الإضافات والمصادر المتوفرة (Extensions List)
-# ========================================================
-@app.get("/api/extensions")
-def get_extensions():
-    return {
-        "extensions": [
-            {
-                "id": "mangadex",
-                "name": "MangaDex (EN)",
-                "base_url": "https://mangadex.org",
-                "lang": "en",
-                "icon_url": "https://mangadex.org/favicon.ico",
-                "status": "online",
-            },
-            {
-                "id": "mgeko",
-                "name": "MangaGeko (EN)",
-                "base_url": "https://www.mgeko.cc",
-                "lang": "en",
-                "icon_url": "https://www.mgeko.cc/favicon.ico",
-                "status": "online",
-            },
-        ]
-    }
-
-
-# ========================================================
-# 1. جلب المانهوات بحسب المصدر (افتراضياً MangaDex)
+# 1. جلب المانهوات الكورية (مع أغلفة مضمونة)
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = "", source: str = "mangadex"):
@@ -100,7 +18,6 @@ def get_mangas(page: int = 1, query: str = "", source: str = "mangadex"):
     if query.strip():
         params.append(("title", query.strip()))
     else:
-        # ترتيب حسب الأكثر شعبية ومتابعة
         params.append(("order[followedCount]", "desc"))
 
     query_string = urllib.parse.urlencode(params)
@@ -128,11 +45,13 @@ def get_mangas(page: int = 1, query: str = "", source: str = "mangadex"):
                 cover_file = rel.get("attributes", {}).get("fileName", "")
                 break
 
-        # استخدام الرابط المباشر للغلاف المصغر
+        # رابط الغلاف
         if cover_file and m_id:
-            cover_url = f"https://uploads.mangadex.org/covers/{m_id}/{cover_file}.256.jpg"
+            cover_url = (
+                f"https://uploads.mangadex.org/covers/{m_id}/{cover_file}.256.jpg"
+            )
         else:
-            cover_url = "https://mangadex.org/img/avatar.png"
+            cover_url = ""
 
         mangas.append(
             {
@@ -147,7 +66,7 @@ def get_mangas(page: int = 1, query: str = "", source: str = "mangadex"):
 
 
 # ========================================================
-# 2. جلب فصول المانهوا بالكامل تصاعدياً
+# 2. جلب جميع فصول المانهوا بدون تقييد صارم
 # ========================================================
 @app.get("/api/chapters")
 def get_chapters(manga_url: str, source: str = "mangadex"):
@@ -155,12 +74,12 @@ def get_chapters(manga_url: str, source: str = "mangadex"):
     chapters = []
     seen = set()
 
+    # طلب الفصول مع دعم عدة لغات إنكليزية شائعة
     params = [
         ("limit", 500),
         ("order[chapter]", "asc"),
         ("contentRating[]", "safe"),
         ("contentRating[]", "suggestive"),
-        ("translatedLanguage[]", "en"),
     ]
 
     query_string = urllib.parse.urlencode(params)
@@ -176,12 +95,19 @@ def get_chapters(manga_url: str, source: str = "mangadex"):
             attr = ch.get("attributes", {})
             ch_num = attr.get("chapter")
             ch_title = attr.get("title")
+            ch_lang = attr.get("translatedLanguage")
+
+            # نأخذ الفصول الإنجليزية فقط
+            if ch_lang != "en":
+                continue
 
             if not ch_id:
                 continue
 
             if ch_num:
-                name = f"الفصل {ch_num}" + (f" - {ch_title}" if ch_title else "")
+                name = f"الفصل {ch_num}" + (
+                    f" - {ch_title}" if ch_title else ""
+                )
                 num_match = re.findall(r"\d+(?:\.\d+)?", str(ch_num))
                 val = float(num_match[0]) if num_match else 99999.0
             else:
@@ -193,46 +119,10 @@ def get_chapters(manga_url: str, source: str = "mangadex"):
                 seen.add(key)
                 temp_list.append((val, name, ch_id))
 
-        # ترتيب الفصول رقمياً لتظهر من الفصل 1 تصاعدياً
         temp_list.sort(key=lambda x: x[0])
         for val, name, ch_id in temp_list:
             chapters.append({"title": name, "url": ch_id})
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error fetching chapters: {e}")
 
     return {"total": len(chapters), "source": source, "chapters": chapters}
-
-
-# ========================================================
-# 3. جلب صفحات الفصل
-# ========================================================
-@app.get("/api/pages")
-def get_pages(chapter_url: str, source: str = "mangadex"):
-    clean_id = chapter_url.strip().strip("/").split("/")[-1]
-    data = fetch_json(f"{MD_API}/at-home/server/{clean_id}")
-
-    base_url = data.get("baseUrl")
-    chapter_data = data.get("chapter", {})
-    hash_code = chapter_data.get("hash")
-    files = chapter_data.get("data", [])
-
-    images = [f"{base_url}/data/{hash_code}/{f}" for f in files]
-    return {"total_pages": len(images), "source": source, "images": images}
-
-
-# ========================================================
-# 4. بروكسي الصور
-# ========================================================
-@app.get("/api/proxy-image")
-def proxy_image(url: str):
-    req_headers = {
-        "User-Agent": "ManhwaArabicApp/1.0 (Android)",
-        "Referer": "https://mangadex.org/",
-    }
-    req = urllib.request.Request(url, headers=req_headers)
-    try:
-        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
-            content_type = resp.headers.get("Content-Type", "image/jpeg")
-            return Response(content=resp.content, media_type=content_type)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Image not found")
