@@ -4,7 +4,7 @@ from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Manhwa Arabic API", version="5.0.0")
+app = FastAPI(title="Manhwa Arabic API", version="6.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,8 +17,8 @@ app.add_middleware(
 BASE_URL = "https://www.mgeko.cc"
 session = requests.Session(impersonate="chrome120")
 
-# قائمة الكلمات المفتاحية الحقيقية لتقليب الصفحات عند السحب لأسفل
-BATCH_QUERIES = [
+# الكلمات الموجهة لموقع mgeko لجلب مئات المانهوات مع كل تمريرة لأسفل
+SCROLL_QUERIES = [
     "leveling",
     "magic",
     "reincarnation",
@@ -45,6 +45,10 @@ BATCH_QUERIES = [
     "knight",
     "isekai",
     "regression",
+    "cultivation",
+    "revenge",
+    "overpowered",
+    "awakening",
 ]
 
 
@@ -56,17 +60,17 @@ def home():
     }
 
 
+# ========================================================
+# المحلل الذكي: يستخرج العنوان والصورة حتى لو كانا في حاويات منفصلة
+# ========================================================
 def extract_mangas_from_html(html_text: str):
     soup = BeautifulSoup(html_text, "html.parser")
     mangas = []
 
+    # البحث عن كل الروابط التي تشير إلى مانهوا
     for a in soup.select("a[href*='/manga/']"):
-        img = a.select_one("img")
-        if not img:
-            continue
-
         href = a.get("href", "")
-        if not href or href == "/manga/" or href.endswith("/manga/"):
+        if not href or href in ["/manga/", "/manga", "/manga/all-chapters/"]:
             continue
 
         if not href.startswith("http"):
@@ -74,31 +78,71 @@ def extract_mangas_from_html(html_text: str):
         if href.endswith("/all-chapters/"):
             href = href.replace("/all-chapters/", "/")
 
-        cover = (
-            img.get("data-src")
-            or img.get("data-lazy-src")
-            or img.get("src")
-            or ""
-        ).strip()
-        if cover.startswith("//"):
-            cover = "https:" + cover
-        elif cover.startswith("/"):
-            cover = urllib.parse.urljoin(BASE_URL, cover)
+        # تجنب التكرار
+        if any(m["url"] == href for m in mangas):
+            continue
 
-        title = img.get("alt", "").strip()
-        if not title:
-            parent = a.find_parent()
-            if parent:
-                t_el = parent.select_one("h2, h3, h4, .title, .novel-title")
-                if t_el:
-                    title = t_el.get_text(strip=True)
-        if not title:
+        # العثور على الحاوية الأب (Card Container) التي تجمع الصورة والعنوان معاً
+        container = a.find_parent(
+            lambda tag: tag.name in ["li", "div", "article"]
+            and tag.select_one("img") is not None
+        )
+        if not container:
+            container = a.parent
+
+        # 1. استخراج الصورة
+        img = a.select_one("img")
+        if not img and container:
+            img = container.select_one("img")
+
+        cover = ""
+        if img:
+            cover = (
+                img.get("data-src")
+                or img.get("data-lazy-src")
+                or img.get("src")
+                or ""
+            ).strip()
+            if cover.startswith("//"):
+                cover = "https:" + cover
+            elif cover.startswith("/"):
+                cover = urllib.parse.urljoin(BASE_URL, cover)
+
+        if not cover or not cover.startswith("http"):
+            cover = "https://www.mgeko.cc/static/img/logo_200x200.png"
+
+        # 2. استخراج العنوان
+        title = ""
+        # من نص الرابط نفسه
+        if a.get_text(strip=True):
             title = a.get_text(strip=True)
+        # أو من alt الخاص بالصورة
+        if (not title or len(title) < 2) and img and img.get("alt"):
+            title = img.get("alt").strip()
+        # أو من عناوين الحاوية
+        if (not title or len(title) < 2) and container:
+            heading = container.select_one(
+                "h1, h2, h3, h4, h5, .title, .novel-title"
+            )
+            if heading:
+                title = heading.get_text(strip=True)
+
+        ignore_words = [
+            "read now",
+            "read manga",
+            "manga",
+            "view more",
+            "details",
+            "all chapters",
+            "read",
+            "chapters",
+        ]
 
         if (
             title
-            and cover.startswith("http")
-            and not any(m["url"] == href for m in mangas)
+            and len(title) > 2
+            and title.lower() not in ignore_words
+            and not title.lower().startswith("chapter")
         ):
             mangas.append({"title": title, "url": href, "cover_url": cover})
 
@@ -106,7 +150,7 @@ def extract_mangas_from_html(html_text: str):
 
 
 # ========================================================
-# 1. نظام السحب لأسفل الحقيقي (الصفحة 1، 2، 3، 4...)
+# 1. نقطة جلب المانهوا (واجهة + سحب لأسفل مستمر)
 # ========================================================
 @app.get("/api/mangas")
 def get_mangas(page: int = 1, query: str = ""):
@@ -116,13 +160,13 @@ def get_mangas(page: int = 1, query: str = ""):
         encoded = urllib.parse.quote(query)
         target_url = f"{BASE_URL}/search/?keyword={encoded}"
     elif page <= 1:
-        # الصفحة الأولى: الواجهة الرئيسية
+        # عند فتح التطبيق: يجلب الواجهة الرئيسية
         target_url = BASE_URL
     else:
-        # مع كل سحبة لأسفل: يطلب صفحة مانهوات جديدة غير مكررة
-        idx = (page - 2) % len(BATCH_QUERIES)
-        q = BATCH_QUERIES[idx]
-        target_url = f"{BASE_URL}/search/?keyword={q}"
+        # مع كل سحبة لأسفل: يطلب مانهوات جديدة عبر الكلمات المستهدفة
+        idx = (page - 2) % len(SCROLL_QUERIES)
+        keyword = SCROLL_QUERIES[idx]
+        target_url = f"{BASE_URL}/search/?keyword={keyword}"
 
     try:
         resp = session.get(
@@ -191,7 +235,7 @@ def get_chapters(manga_url: str):
 
 
 # ========================================================
-# 3. استخراج روابط صور الفصل المختار
+# 3. استخراج روابط صور الفصل
 # ========================================================
 @app.get("/api/pages")
 def get_pages(chapter_url: str):
